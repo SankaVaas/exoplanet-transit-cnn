@@ -1,0 +1,82 @@
+# =============================================================================
+# exoplanet-transit-cnn :: central configuration
+# Single source of truth for data, model, and training parameters.
+# Import via src/utils/config.py -> load_config()
+# =============================================================================
+
+project:
+  name: "exoplanet-transit-cnn"
+  seed: 42
+  description: >
+    CNN + attention hybrid for classifying transiting-exoplanet candidates
+    from Kepler/TESS light curves, following the global/local view design of
+    Shallue & Vanderburg (2018), extended with a lightweight attention block
+    and calibrated uncertainty estimates.
+
+data:
+  mission: "kepler"                # options: kepler, tess
+  source: "nasa_exoplanet_archive"  # cumulative KOI table for labels
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  external_dir: "data/external"
+
+  # Light curve preprocessing (mirrors Shallue & Vanderburg 2018 view design)
+  global_view_bins: 2001
+  local_view_bins: 201
+  local_view_num_durations: 4        # local window = 4x transit duration
+  detrending_method: "spline"        # options: spline, savgol
+  spline_break_factor: 1.5
+
+  # Class labels from KOI disposition column
+  label_map:
+    CONFIRMED: 1
+    CANDIDATE: 1
+    FALSE POSITIVE: 0
+
+  # Split strategy — grouped by star (KepID) to prevent leakage between
+  # multiple planets/candidates around the same host star
+  test_size: 0.15
+  val_size: 0.15
+  split_by: "kepid"
+  stratify: true
+
+model:
+  architecture: "astronet_lite"      # options: astronet_lite, resnet1d, transformer1d
+  global_conv_channels: [16, 32, 64, 128]
+  local_conv_channels: [16, 32]
+  kernel_size: 5
+  pool_size: 5
+  dropout: 0.3
+  attention: true
+  attention_heads: 4
+  fc_hidden: [128, 64]
+  output_activation: "sigmoid"
+
+training:
+  device: "auto"                     # auto-detects cuda (Colab T4) else cpu
+  batch_size: 32                     # safe for CPU dev; raise to 64-128 on T4
+  epochs: 60
+  learning_rate: 0.0005
+  weight_decay: 0.00001
+  optimizer: "adamw"
+  scheduler: "cosine_warm_restarts"
+  early_stopping_patience: 8
+  loss: "focal"                      # handles rare true-transit class imbalance
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  mixed_precision: true              # torch.cuda.amp — only active on GPU
+  gradient_accumulation_steps: 1
+  num_workers: 2                     # Colab-safe; set 0 on Windows CPU dev
+
+evaluation:
+  metrics: ["precision", "recall", "f1", "roc_auc", "pr_auc", "brier_score"]
+  decision_threshold: 0.5
+  calibration: "temperature_scaling"
+  bootstrap_iterations: 1000         # for 95% CI on all reported metrics
+
+logging:
+  tensorboard_dir: "outputs/logs"
+  checkpoint_dir: "models/checkpoints"
+  figures_dir: "outputs/figures"
+  save_best_only: true
+  monitor_metric: "val_pr_auc"
