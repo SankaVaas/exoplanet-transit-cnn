@@ -1,0 +1,41 @@
+# Core numerical / data stack
+numpy>=1.26,<2.0
+pandas>=2.1
+scipy>=1.11
+
+# Astronomy-specific I/O and light curve tools
+lightkurve>=2.4          # Kepler/TESS light curve download + preprocessing
+astropy>=6.0
+astroquery>=0.4.7         # MAST/NASA Exoplanet Archive queries
+
+# Deep learning (CPU dev locally, CUDA auto-detected on Colab T4)
+torch>=2.2
+torchvision>=0.17
+
+# Classical ML / baselines / metrics
+scikit-learn>=1.4
+imbalanced-learn>=0.12    # SMOTE / class imbalance handling for rare transits
+
+# Explainability
+shap>=0.45
+grad-cam>=1.5             # Grad-CAM for 1D/2D conv interpretability (adapted)
+
+# Experiment tracking & config
+pyyaml>=6.0
+tqdm>=4.66
+tensorboard>=2.16
+
+# Visualization
+matplotlib>=3.8
+seaborn>=0.13
+
+# Testing
+pytest>=8.0
+pytest-cov>=5.0
+
+# HTTP client (NASA Exoplanet Archive TAP queries)
+requests>=2.31
+
+# Notebook environment
+jupyterlab>=4.1
+ipywidgets>=8.1
