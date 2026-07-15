@@ -72,8 +72,15 @@ def download_light_curves_for_star(
                 logger.warning(f"No light curves found for KIC {kepid}.")
                 return None
 
-            # Download all available quarters and stitch into one time series.
-            lc_collection = search_result.download_all()
+            # On the first attempt, use the local astropy/lightkurve cache if
+            # present (faster, avoids re-downloading valid files). On any
+            # retry, force cache=False: a common real-world failure mode is
+            # a PREVIOUS interrupted download leaving a truncated FITS file
+            # in the cache, which astropy will happily keep trying to read
+            # (and fail identically) on every subsequent attempt unless
+            # explicitly told to bypass the cache and re-fetch from MAST.
+            use_cache = attempt == 1
+            lc_collection = search_result.download_all(cache=use_cache)
             stitched = lc_collection.stitch()
 
             # Remove NaNs and clear outliers flagged by the mission pipeline's
@@ -82,7 +89,13 @@ def download_light_curves_for_star(
             stitched = stitched.remove_nans().remove_outliers(sigma=6)
 
             output_dir.mkdir(parents=True, exist_ok=True)
-            df = stitched.to_pandas()[["time", "flux", "flux_err"]]
+            df = pd.DataFrame(
+                {
+                    "time": stitched.time.value,
+                    "flux": stitched.flux.value,
+                    "flux_err": stitched.flux_err.value,
+                }
+            )
             df.to_csv(output_path, index=False)
             return output_path
 
