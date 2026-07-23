@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -93,7 +94,10 @@ def download_fits_via_requests(data_uri: str, dest_path: Path, timeout: int = 12
         expected_size = int(resp.headers.get("Content-Length", -1))
 
         total = 0
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+        except FileExistsError:
+            pass  # benign race: another thread created the same parent dir first
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=65536):
                 f.write(chunk)
@@ -243,29 +247,75 @@ def download_batch(
     mission: str = "Kepler",
     author: str = "Kepler",
     cadence: str = "long",
+    max_workers: int = 8,
 ) -> dict[str, int]:
-    """Download light curves for a list of kepids, with a live progress bar."""
+    """Download light curves for a list of kepids concurrently, with a live
+    progress bar.
+
+    Args:
+        max_workers: number of concurrent download threads. MAST generally
+            tolerates a handful of concurrent connections per client without
+            throttling; 8 is a reasonable default that gives a large speedup
+            over sequential downloading without being aggressive enough to
+            risk rate-limiting or IP-level blocking. Lower this (e.g. 3-4)
+            if you start seeing repeated connection-level failures across
+            many stars at once — that's usually a sign of being rate-limited
+            rather than of individual star/file problems.
+
+    Returns:
+        dict with counts of "succeeded", "failed", "skipped_existing".
+
+    Note on thread-safety: each worker thread handles a fully independent
+    star (separate output file, separate cache subdirectory), so there's no
+    shared mutable state between them. The `stats` dict is only ever
+    updated from the main thread as futures complete via `as_completed`,
+    not from inside the worker threads themselves — so no lock is needed.
+    """
     stats = {"succeeded": 0, "failed": 0, "skipped_existing": 0}
 
-    progress = tqdm(kepids, desc="Downloading light curves", unit="star", dynamic_ncols=True)
-    for kepid in progress:
-        existed_before = (output_dir / f"kic_{kepid}.csv").exists()
-        star_start = time.time()
-        result = download_light_curves_for_star(kepid, output_dir, fits_cache_dir, mission, author, cadence)
-        star_elapsed = time.time() - star_start
-
-        if result is None:
-            stats["failed"] += 1
-        elif existed_before:
+    # Stars already downloaded (resumable) don't need a worker thread at
+    # all — check this up front so the progress bar and thread pool only
+    # deal with the stars that actually need network activity.
+    pending_kepids = []
+    for kepid in kepids:
+        if (output_dir / f"kic_{kepid}.csv").exists():
             stats["skipped_existing"] += 1
         else:
-            stats["succeeded"] += 1
+            pending_kepids.append(kepid)
 
-        progress.set_postfix(
-            ok=stats["succeeded"], skip=stats["skipped_existing"], fail=stats["failed"],
-            last=f"{star_elapsed:.1f}s",
-        )
+    if stats["skipped_existing"] > 0:
+        logger.info(f"{stats['skipped_existing']} stars already downloaded, skipping.")
 
+    if not pending_kepids:
+        return stats
+
+    progress = tqdm(total=len(pending_kepids), desc="Downloading light curves", unit="star", dynamic_ncols=True)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_kepid = {
+            executor.submit(
+                download_light_curves_for_star, kepid, output_dir, fits_cache_dir, mission, author, cadence
+            ): kepid
+            for kepid in pending_kepids
+        }
+
+        for future in as_completed(future_to_kepid):
+            kepid = future_to_kepid[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001 — a worker-thread crash should not kill the whole batch
+                logger.error(f"KIC {kepid}: unexpected error in worker thread: {exc}")
+                result = None
+
+            if result is None:
+                stats["failed"] += 1
+            else:
+                stats["succeeded"] += 1
+
+            progress.set_postfix(ok=stats["succeeded"], skip=stats["skipped_existing"], fail=stats["failed"])
+            progress.update(1)
+
+    progress.close()
     return stats
 
 
@@ -274,6 +324,14 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--cadence", type=str, default="long", choices=["long", "short"])
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of concurrent download threads (default: 8). Lower this "
+        "if you see widespread connection failures, which usually indicates "
+        "rate-limiting rather than a per-star problem.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -293,8 +351,15 @@ def main() -> None:
     fits_cache_dir = Path(cfg.data.raw_dir) / "fits_cache"
     mission_name = "Kepler" if cfg.data.mission == "kepler" else "TESS"
 
-    logger.info(f"Downloading light curves for {len(kepids)} stars ({mission_name}, {args.cadence} cadence)...")
-    stats = download_batch(kepids, output_dir, fits_cache_dir, mission=mission_name, author=mission_name, cadence=args.cadence)
+    logger.info(
+        f"Downloading light curves for {len(kepids)} stars "
+        f"({mission_name}, {args.cadence} cadence, {args.workers} parallel workers)..."
+    )
+    stats = download_batch(
+        kepids, output_dir, fits_cache_dir,
+        mission=mission_name, author=mission_name, cadence=args.cadence,
+        max_workers=args.workers,
+    )
     logger.info(f"Done. Final stats: {stats}")
 
 
